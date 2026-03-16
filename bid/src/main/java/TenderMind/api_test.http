@@ -1,0 +1,49 @@
+### 1. FETCH DATA FOR KONSTANTINOS (Infrastructure & Bridges)
+POST http://localhost:8080/api/search-bid
+Content-Type: application/json
+
+{
+  "cpvItems": ["45221111-3", "45233120-6"],
+  "dateFrom": "2025-01-01",
+  "dateTo": "2026-01-01"
+}
+
+### 2. FETCH DATA FOR MARIA (IT & Software)
+POST http://localhost:8080/api/search-bid
+Content-Type: application/json
+
+{
+  "cpvItems": ["72000000-5"],
+  "dateFrom": "2025-01-01",
+  "dateTo": "2026-01-01"
+}
+
+### 3. MONITORING: VIEW ALL COLLECTED DATA
+GET http://localhost:8080/api/search-bid/all
+Accept: application/json
+
+### 4. EXECUTE AI MATCHING (Trigger Python)
+POST http://localhost:8080/api/matching/run
+Accept: application/json
+
+### 5. MONITORING: VIEW REGISTERED USERS
+GET http://localhost:8080/api/users
+Accept: application/json
+
+### 6. USER MANAGEMENT: ADD A THIRD USER MANUALLY
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{
+  "fullName": "Andreas Tech",
+  "age": 38,
+  "profession": "Software Engineer",
+  "preferredCostMin": 5000,
+  "preferredCostMax": 50000,
+  "nutsCode": "EL30",
+  "cpvCode": "72000000",
+  "interests": [
+    {"name": "Digital Transformation"},
+    {"name": "IoT Solutions"}
+  ]
+}
