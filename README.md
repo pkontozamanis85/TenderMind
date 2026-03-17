@@ -25,6 +25,27 @@ The project utilizes a decoupled architecture to separate concerns between data 
 
 ---
 
+## Prerequisites
+
+Before running the system, ensure you have the following installed:
+- **Java Development Kit (JDK) 17+**
+- **Maven 3.6+** (for building the Spring Boot app)
+- **Python 3.9+**
+- **Python Libraries:**
+### Python Dependencies
+The AI Matching Engine requires specific libraries to handle vectorization and data processing. Install them using the command appropriate for your Operating System:
+
+**For Windows:**
+```bash
+py -m pip install pandas sentence-transformers requests torch
+```
+
+**For MacOS/Linux:**
+```bash
+python -m pip install pandas sentence-transformers requests torch
+```
+---
+
 ## Key Engineering Features
 
 - Strict Financial Filtering: Applies boolean masking algorithms to ensure recommendations strictly adhere to a contractor's minimum and maximum budget capacity.
@@ -33,6 +54,15 @@ The project utilizes a decoupled architecture to separate concerns between data 
 - Idempotent Pipeline: Advanced duplicate prevention logic using unique reference numbers to maintain data integrity in the persistence layer.
 - Automated Seeding: A pre-configured data.sql script initializes professional profiles (Civil Engineers, IT Consultants) and their complex interest networks upon startup.
 - Process Execution Management: Integrated Java-to-Python execution bridge allowing the ML engine to be triggered via standard REST endpoints.
+
+---
+### System Workflow
+
+1. **Data Ingestion:** The Java `SearchService` fetches paginated data from the government API. It uses a path-agnostic mapping strategy to resolve CPV and NUTS codes from inconsistent JSON structures.
+2. **Asynchronous Orchestration:** Ingestion and Matching are handled via `CompletableFuture` and `ProcessBuilder`, ensuring the REST API remains responsive (returning 202 Accepted) while heavy tasks run in the background.
+3. **Semantic Scoring:** The Python engine calculates a weighted score for each candidate:
+   $$Final Score = (0.3 \times Semantic) + (0.4 \times CPV) + (0.3 \times Location)$$
+4. **Output:** Personalized JSON reports are generated in the `/recommendations` directory.
 
 ---
 
