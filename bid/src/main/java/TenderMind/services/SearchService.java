@@ -17,11 +17,10 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.StreamSupport;
 
 /**
- * Service Layer responsible for data acquisition from the Greek eProcurement Open Data API.
- * Handles paginated ingestion, JSON mapping, and duplicate prevention.
+ * Service responsible for paginated data ingestion from the KHMDHS API.
+ * Implements path-agnostic JSON mapping for CPV, NUTS, and Budgetary data.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -33,35 +32,21 @@ public class SearchService {
     private final BidRepository bidRepository;
 
     private static final String BASE_URL = "https://cerpp.eprocurement.gov.gr/khmdhs-opendata/notice?page=";
+    private static final int MAX_PAGES_LIMIT = 100;
 
-    /**
-     * Safety limit to prevent infinite loops and timeouts during bulk ingestion.
-     * Higher values will fetch more data but might trigger client timeouts.
-     */
-    private static final int MAX_PAGES_LIMIT = 10;
-
-    /**
-     * Executes a paginated search against the government API and persists new bids.
-     * Uses effectively final variables to comply with Java Lambda requirements.
-     */
-    public List<Bid> search(SearchDto searchDto) {
-        List<Bid> allSavedBids = new ArrayList<>();
+    public void search(SearchDto searchDto) {
         DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
         try {
-            log.info("Starting ingestion for criteria: {}", searchDto);
-
+            log.info("Starting background ingestion pipeline for: {}", searchDto);
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
-            // Build dynamic request payload
             ObjectNode requestNode = objectMapper.createObjectNode();
             if (searchDto.getTitle() != null) requestNode.put("title", searchDto.getTitle());
             if (searchDto.getDateFrom() != null) requestNode.put("dateFrom", searchDto.getDateFrom().format(dateFormatter));
             if (searchDto.getDateTo() != null) requestNode.put("dateTo", searchDto.getDateTo().format(dateFormatter));
 
-            // Map CPV Items array
             if (searchDto.getCpvItems() != null && !searchDto.getCpvItems().isEmpty()) {
                 ArrayNode cpvArray = requestNode.putArray("cpvItems");
                 searchDto.getCpvItems().forEach(cpvArray::add);
@@ -70,13 +55,11 @@ public class SearchService {
             String requestBody = objectMapper.writeValueAsString(requestNode);
             int page = 0;
             boolean lastPage = false;
+            int totalNewRecords = 0;
 
+            // Pagination loop: Continues until 'last: true' or MAX_PAGES_LIMIT is reached.
             while (!lastPage && page < MAX_PAGES_LIMIT) {
-                // Create a final copy of the current page index
-                final int currentPageForLambda = page;
-                log.info("Fetching Page {}/{}...", currentPageForLambda, MAX_PAGES_LIMIT - 1);
-
-                String url = BASE_URL + currentPageForLambda;
+                String url = BASE_URL + page;
                 HttpEntity<String> request = new HttpEntity<>(requestBody, headers);
                 ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.POST, request, String.class);
 
@@ -85,69 +68,98 @@ public class SearchService {
                     JsonNode content = responseJson.path("content");
 
                     List<Bid> batchToSave = new ArrayList<>();
-                    StreamSupport.stream(content.spliterator(), false).forEach(bidNode -> {
-                        try {
-                            Bid bid = mapJsonToBid(bidNode);
-
-                            // Idempotency check: Skip if reference number exists
-                            if (bidRepository.findByReferenceNumber(bid.getReferenceNumber()).isEmpty()) {
-                                batchToSave.add(bid);
-                            }
-                        } catch (Exception e) {
-                            log.warn("Mapping error on page {}: {}", currentPageForLambda, e.getMessage());
+                    for (JsonNode bidNode : content) {
+                        Bid bid = mapJsonToBid(bidNode);
+                        // Prevent duplicates based on unique Reference Number
+                        if (bidRepository.findByReferenceNumber(bid.getReferenceNumber()).isEmpty()) {
+                            batchToSave.add(bid);
                         }
-                    });
-
-                    if (!batchToSave.isEmpty()) {
-                        List<Bid> saved = bidRepository.saveAll(batchToSave);
-                        allSavedBids.addAll(saved);
-                        log.info("Saved {} new bids from page {}.", saved.size(), currentPageForLambda);
                     }
 
-                    lastPage = responseJson.path("last").asBoolean(false);
-                    page++; // Normal increment for the while loop
+                    if (!batchToSave.isEmpty()) {
+                        bidRepository.saveAll(batchToSave);
+                        totalNewRecords += batchToSave.size();
+                    }
+
+                    lastPage = responseJson.path("last").asBoolean(true);
+                    log.info("Page {}: Ingested {} records. Last page: {}", page, batchToSave.size(), lastPage);
+                    page++;
                 } else {
-                    log.error("External API error on page {}: {}", currentPageForLambda, response.getStatusCode());
+                    log.warn("API responded with error at page {}. Stopping ingestion.", page);
                     break;
                 }
             }
-            log.info("Ingestion completed successfully. Total records stored: {}", allSavedBids.size());
-
+            log.info("Ingestion completed successfully. Total new records: {}", totalNewRecords);
         } catch (Exception e) {
-            log.error("Fatal failure during bid ingestion pipeline", e);
+            log.error("CRITICAL: Ingestion pipeline failed", e);
         }
-        return allSavedBids;
     }
 
     /**
-     * Retrieves all cached tenders from H2 for the Python ML Engine.
-     */
-    public List<Bid> findAllStoredBids() {
-        return bidRepository.findAll();
-    }
-
-    /**
-     * Maps raw JSON node from the Greek API to the internal Bid domain model.
+     * Maps raw JSON to Bid entity with deep-path extraction for CPV codes.
+     * Optimized based on logs for reference numbers like 25PROC018268798.
      */
     private Bid mapJsonToBid(JsonNode node) {
         String referenceNumber = node.path("referenceNumber").asText(null);
-        String title = node.path("title").asText("No Title Provided");
+        String title = node.path("title").asText("N/A");
+        String organization = node.path("organization").path("value").asText("Unknown");
 
-        // Complex object mapping (NUTS & Organization)
-        String nutsCode = node.path("nutsCode").path("key").asText("N/A");
-        String organization = node.path("organization").path("value").asText("Unknown Organization");
-
-        // Date handling with fallback
+        // 1. Date and Cost
         String dateStr = node.path("publishDate").asText("");
         if (dateStr.isEmpty()) dateStr = node.path("signedDate").asText("");
         LocalDate date = (!dateStr.isEmpty()) ? LocalDate.parse(dateStr.substring(0, 10)) : LocalDate.now();
 
-        // Financial data mapping
-        Double cost = node.path("totalCostWithVAT").isNumber() ? node.path("totalCostWithVAT").asDouble() : 0.0;
 
-        // Industry classification
-        String cpv = node.path("cpvCode").path("key").asText("N/A");
+        double extractedCost = node.path("totalCostWithVAT").asDouble(0.0);
+        if (extractedCost == 0.0) {
+            extractedCost = node.path("budgetAmountVAT").asDouble(0.0);
+        }
 
-        return new Bid(referenceNumber, title, "Automated AI Ingestion", cpv, organization, date, cost, nutsCode);
+        // 2. NUTS Extraction
+        String extractedNuts = "N/A";
+        if (node.has("nutsCode")) {
+            JsonNode nNode = node.path("nutsCode");
+            extractedNuts = nNode.has("key") ? nNode.path("key").asText() : nNode.asText();
+        }
+
+        // 3. DEEP CPV EXTRACTION
+        String extractedCpv = "N/A";
+
+        // Path A: New path (objectDetails -> cpvs -> key)
+        if (node.has("objectDetails") && node.path("objectDetails").isArray() && !node.path("objectDetails").isEmpty()) {
+            JsonNode firstDetail = node.path("objectDetails").get(0);
+            if (firstDetail.has("cpvs") && firstDetail.path("cpvs").isArray() && !firstDetail.path("cpvs").isEmpty()) {
+                extractedCpv = firstDetail.path("cpvs").get(0).path("key").asText("N/A");
+            }
+        }
+
+        // Path B: Fallback in cpvItems (if Path A fails)
+        if ("N/A".equals(extractedCpv) && node.has("cpvItems") && node.path("cpvItems").isArray() && !node.path("cpvItems").isEmpty()) {
+            JsonNode first = node.path("cpvItems").get(0);
+            extractedCpv = first.has("key") ? first.path("key").asText() : first.asText();
+        }
+
+        // Path C: Fallback σε cpvCode ή mainCpvCode
+        if ("N/A".equals(extractedCpv)) {
+            if (node.has("cpvCode")) {
+                extractedCpv = node.path("cpvCode").has("key") ? node.path("cpvCode").path("key").asText() : node.path("cpvCode").asText();
+            } else if (node.has("mainCpvCode")) {
+                extractedCpv = node.path("mainCpvCode").has("key") ? node.path("mainCpvCode").path("key").asText() : node.path("mainCpvCode").asText();
+            }
+        }
+
+        //  Clean
+        if (extractedCpv != null && !extractedCpv.equals("N/A")) {
+            extractedCpv = extractedCpv.split("-")[0].trim();
+        } else {
+            // Αν ακόμα είναι N/A, το log θα μας πει γιατί
+            log.warn("CPV STILL MISSING for {}. Path verified?", referenceNumber);
+        }
+
+        return new Bid(referenceNumber, title, "AI-Ingest", extractedCpv, organization, date, extractedCost, extractedNuts);
+    }
+
+    public List<Bid> findAllStoredBids() {
+        return bidRepository.findAll();
     }
 }

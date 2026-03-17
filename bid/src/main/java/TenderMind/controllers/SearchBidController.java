@@ -1,7 +1,6 @@
 package TenderMind.controllers;
 
 import TenderMind.dtos.SearchDto;
-import TenderMind.model.Bid;
 import TenderMind.services.SearchService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -10,12 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
-/**
- * Controller handling the ingestion of external tender data.
- * Acts as the entry point for synchronizing the local database with government open data.
- */
 @Slf4j
 @RestController
 @RequestMapping("/api/search-bid")
@@ -26,27 +21,27 @@ public class SearchBidController {
     private final SearchService searchService;
 
     /**
-     * Triggers a paginated search against the National eProcurement API.
-     * Persists new bids while skipping duplicates.
+     * Triggers a paginated search asynchronously.
+     * Returns 202 Accepted immediately to prevent client-side ReadTimeout.
      */
     @PostMapping
-    @Operation(summary = "Ingest bids from external API based on filters")
-    public ResponseEntity<List<Bid>> searchBids(@RequestBody SearchDto searchDto) {
-        log.info("Request received to fetch bids from external source: {}", searchDto);
-        List<Bid> newlyIngestedBids = searchService.search(searchDto);
-        log.info("Batch ingestion completed. {} new records saved.", newlyIngestedBids.size());
-        return ResponseEntity.ok(newlyIngestedBids);
+    @Operation(summary = "Ingest bids from external API (Async)")
+    public ResponseEntity<String> searchBids(@RequestBody SearchDto searchDto) {
+        log.info("Async request received for ingestion: {}", searchDto);
+
+        // Fire and forget: The service handles the persistence in the background
+        CompletableFuture.runAsync(() -> searchService.search(searchDto))
+                .exceptionally(ex -> {
+                    log.error("Background ingestion failed: {}", ex.getMessage());
+                    return null;
+                });
+
+        return ResponseEntity.accepted().body("Ingestion process started in the background.");
     }
 
-    /**
-     * Returns all bids stored in the local H2 database.
-     * Crucial for the Python ML Engine to retrieve data for similarity analysis.
-     */
     @GetMapping("/all")
     @Operation(summary = "Retrieve all cached bids for the matching engine")
-    public ResponseEntity<List<Bid>> getAllBids() {
-        List<Bid> bids = searchService.findAllStoredBids();
-        log.info("Matching engine requested bid data. Returning {} records.", bids.size());
-        return ResponseEntity.ok(bids);
+    public ResponseEntity<?> getAllBids() {
+        return ResponseEntity.ok(searchService.findAllStoredBids());
     }
 }
