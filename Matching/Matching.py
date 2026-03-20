@@ -97,25 +97,31 @@ def main():
             user_name = u_data.get("fullName", "Unknown")
             logging.info(f"AI ENGINE: Scoring for User: {user_name}")
 
-            # 1. Budget Constraints (Strict Filter)
+        # 1. Budget Constraints (Strict Filter)
             c_min = float(u_data.get("preferredCostMin") or 0.0)
             c_max = float(u_data.get("preferredCostMax") or 1e12)
             
+            # --- OPTIMIZATION: Filter budget FIRST ---
+            user_bids = df_bids[(df_bids["cost"] >= c_min) & (df_bids["cost"] <= c_max)].copy()
+
+            if user_bids.empty:
+                logging.info(f"AI ENGINE: No matches found in budget range for {user_name}")
+                continue
+
             # 2. Semantic Query from Interests
             interests = [itst["name"] for itst in u_data.get("interests", [])]
             user_query = ", ".join(interests)
             if not user_query.strip(): continue
 
             user_embedding = model.encode(user_query, convert_to_tensor=True)
-            semantic_scores = util.cos_sim(user_embedding, bid_embeddings)[0].cpu().numpy()
-            df_bids["semantic_score"] = semantic_scores
 
-            # Filter candidates based on HARD budget constraints
-            user_bids = df_bids[(df_bids["cost"] >= c_min) & (df_bids["cost"] <= c_max)].copy()
+            # --- OPTIMIZATION: Get indices of remaining bids and slice the tensor ---
+            filtered_indices = user_bids.index.tolist()
+            filtered_bid_embeddings = bid_embeddings[filtered_indices]
 
-            if user_bids.empty:
-                logging.info(f"AI ENGINE: No matches found in budget range for {user_name}")
-                continue
+            # Calculate semantic similarity ONLY for the bids within budget
+            semantic_scores = util.cos_sim(user_embedding, filtered_bid_embeddings)[0].cpu().numpy()
+            user_bids["semantic_score"] = semantic_scores
 
             # 3. Hybrid Scoring Calculation
             user_bids["loc_score"] = user_bids["nutsCode"].apply(lambda x: location_score(u_data.get("nutsCode"), x))
