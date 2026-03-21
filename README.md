@@ -81,5 +81,14 @@ POST http://localhost:8080/api/matching/run
 
 The system will execute the Python logic and generate personalized recommendation reports in the /recommendations directory.
 
+## Future Improvements & Scalability
+
+As a Minimum Viable Product (MVP), TenderMind currently computes transformer embeddings on-the-fly during the matching phase. While this approach is effective for smaller datasets, scaling to process tens of thousands of active public tenders requires transitioning from compute-heavy operations to memory-efficient indexing. 
+
+To make the system production-ready and capable of handling massive data throughput, the following architectural upgrades are planned:
+
+* **Vector Database Integration:** Transitioning from in-memory Pandas/PyTorch tensor calculations to a dedicated vector database (e.g., ChromaDB, Milvus, or PostgreSQL with pgvector). This will reduce the semantic search time complexity from O(N x M) to O(N log M) through Approximate Nearest Neighbor (ANN) algorithms like FAISS.
+* **Asynchronous Embedding Generation:** Decoupling the NLP processing from the matching request. Transformer embeddings (all-MiniLM-L6-v2) will be generated strictly once during the data ingestion phase (SearchService.java) and persisted in the vector store, eliminating redundant CPU/GPU overhead during user queries.
+* **Persistent Caching Layer:** Implementing a caching mechanism (e.g., Redis) for frequently accessed CPV and NUTS code mappings to further reduce processing latency.
 ---
 Developed for the modernization of Public Procurement discovery.
